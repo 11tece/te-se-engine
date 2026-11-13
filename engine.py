@@ -1,35 +1,63 @@
-name: TE SE Autonomous Production
+import os
+import asyncio
+import requests
+import edge_tts
+from moviepy.editor import VideoFileClip, AudioFileClip
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
 
-on:
-  workflow_dispatch:
-  schedule:
-    - cron: '0 9,18 * * *'
+PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY")
+YT_CLIENT_ID = os.environ.get("YT_CLIENT_ID")
+YT_CLIENT_SECRET = os.environ.get("YT_CLIENT_SECRET")
+YT_REFRESH_TOKEN = os.environ.get("YT_REFRESH_TOKEN")
 
-jobs:
-  produce-and-publish:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-      - name: Install Dependencies
-        run: |
-          sudo apt-get update && sudo apt-get install -y ffmpeg imagemagick
-          sed -i 's/rights="none" pattern="@\*"/rights="read|write" pattern="@*"/' /etc/ImageMagick-6/policy.xml || true
-          pip install --upgrade pip
-          pip install edge-tts moviepy==1.0.3 requests google-api-python-client google-auth-oauthlib
-      - name: Run Engine
-        env:
-          YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
-          YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
-          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
-          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
-        run: python engine.py
-      - name: Save Backup Artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: te-se-latest-video
-          path: final_short.mp4
-          if-no-files-found: ignore
+TEXT = "Success starts with discipline and daily action. Keep building your future every single day."
+TITLE = "Daily Motivation #Shorts"
+DESCRIPTION = "Automated Short #Shorts #Motivation"
+
+async def generate_audio():
+    communicate = edge_tts.Communicate(TEXT, "en-US-ChristopherNeural")
+    await communicate.save("voice.mp3")
+
+def download_video():
+    headers = {"Authorization": PEXELS_API_KEY}
+    url = "https://api.pexels.com/videos/search?query=luxury+motivation&orientation=portrait&per_page=1"
+    res = requests.get(url, headers=headers).json()
+    video_url = res["videos"][0]["video_files"][0]["link"]
+    with open("bg.mp4", "wb") as f:
+        f.write(requests.get(video_url).content)
+
+def create_short():
+    audio = AudioFileClip("voice.mp3")
+    video = VideoFileClip("bg.mp4").subclip(0, audio.duration)
+    final = video.set_audio(audio)
+    final.write_videofile("final_short.mp4", fps=24, codec="libx264", audio_codec="aac")
+
+def upload_to_youtube():
+    creds = Credentials(
+        token=None,
+        refresh_token=YT_REFRESH_TOKEN,
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=YT_CLIENT_ID,
+        client_secret=YT_CLIENT_SECRET
+    )
+    youtube = build("youtube", "v3", credentials=creds)
+    body = {
+        "snippet": {
+            "title": TITLE,
+            "description": DESCRIPTION,
+            "categoryId": "22"
+        },
+        "status": {"privacyStatus": "public"}
+    }
+    media = MediaFileUpload("final_short.mp4", chunksize=-1, resumable=True)
+    request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
+    response = request.execute()
+    print("Uploaded Video ID:", response["id"])
+
+if __name__ == "__main__":
+    asyncio.run(generate_audio())
+    download_video()
+    create_short()
+    upload_to_youtube()
